@@ -1,10 +1,10 @@
 const express = require('express');
-const { Client, RemoteAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
+const { initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
 const QRCode = require('qrcode');
-const chromium = require('@sparticuz/chromium');
 const mongoose = require('mongoose');
-const { MongoStore } = require('wwebjs-mongo');
+const pino = require('pino');
 
 const app = express();
 app.use(express.json());
@@ -14,19 +14,137 @@ const PORT = process.env.PORT || 3001;
 const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
-    console.error('❌ ERROR: MONGO_URI environment variable is not set!');
-    console.error('   Set it in Render → Environment → MONGO_URI');
+    console.error('❌ MONGO_URI environment variable is not set!');
     process.exit(1);
 }
 
+// ─── MongoDB Auth State ──────────────────────────────────────────────────────
+const AuthSchema = new mongoose.Schema({ _id: String, value: mongoose.Schema.Types.Mixed });
+let AuthModel;
+
+async function useMongoAuthState() {
+    if (!AuthModel) AuthModel = mongoose.model('BaileysAuth', AuthSchema);
+
+    const get = async (id) => {
+        const doc = await AuthModel.findById(id).lean();
+        return doc ? JSON.parse(JSON.stringify(doc.value), BufferJSON.reviver) : null;
+    };
+    const set = async (id, value) => {
+        await AuthModel.findByIdAndUpdate(
+            id,
+            { value: JSON.parse(JSON.stringify(value, BufferJSON.replacer)) },
+            { upsert: true }
+        );
+    };
+    const del = async (id) => { await AuthModel.findByIdAndDelete(id); };
+
+    let creds = await get('creds');
+    if (!creds) {
+        creds = initAuthCreds();
+        await set('creds', creds);
+    }
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(ids.map(async (id) => {
+                        let value = await get(`${type}-${id}`);
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }));
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            tasks.push(value ? set(`${category}-${id}`, value) : del(`${category}-${id}`));
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: async () => { await set('creds', creds); }
+    };
+}
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let sock = null;
 let clientReady = false;
 let latestQR = null;
-let client = null;
+let isConnecting = false;
 
-// ─── QR Code Web Page ───────────────────────────────────────────────────────
+// ─── Connect WhatsApp ─────────────────────────────────────────────────────────
+async function connectToWhatsApp() {
+    if (isConnecting) return;
+    isConnecting = true;
+
+    const { state, saveCreds } = await useMongoAuthState();
+    const { version } = await fetchLatestBaileysVersion();
+    console.log(`Using WA v${version.join('.')}`);
+
+    const logger = pino({ level: 'silent' }); // suppress noisy logs
+
+    sock = makeWASocket({
+        version,
+        logger,
+        printQRInTerminal: false,
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, logger)
+        },
+        browser: ['Fusion College LMS', 'Chrome', '10.0.0'],
+        generateHighQualityLinkPreview: false,
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            latestQR = qr;
+            clientReady = false;
+            console.log('QR code generated — visit /qr in your browser to scan it.');
+        }
+
+        if (connection === 'close') {
+            clientReady = false;
+            latestQR = null;
+            isConnecting = false;
+            const statusCode = (lastDisconnect?.error instanceof Boom)
+                ? lastDisconnect.error.output?.statusCode
+                : null;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            console.log(`Connection closed. Reason: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+            if (shouldReconnect) {
+                setTimeout(connectToWhatsApp, 3000);
+            } else {
+                console.log('Logged out. Please restart the server and scan QR again.');
+                // Clear auth state so fresh QR is shown on next start
+                await AuthModel?.deleteMany({});
+            }
+        }
+
+        if (connection === 'open') {
+            clientReady = true;
+            latestQR = null;
+            isConnecting = false;
+            console.log('✅ WhatsApp connected and ready!');
+        }
+    });
+}
+
+// ─── QR Page ─────────────────────────────────────────────────────────────────
 app.get('/qr', async (req, res) => {
-    if (clientReady) {
-        return res.send(`
+    const html = (body) => `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -34,179 +152,74 @@ app.get('/qr', async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>WhatsApp Gateway — Fusion College</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      background: linear-gradient(135deg, #0f1923 0%, #1a2e1a 100%);
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-    }
-    .card {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(37,211,102,0.3);
-      border-radius: 20px;
-      padding: 48px 40px;
-      text-align: center;
-      max-width: 420px;
-      width: 90%;
-      backdrop-filter: blur(12px);
-    }
-    .icon { font-size: 64px; margin-bottom: 16px; }
-    h1 { color: #25d366; font-size: 24px; margin-bottom: 8px; }
-    p { color: #aaa; font-size: 14px; }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#0f1923,#1a2e1a);min-height:100vh;display:flex;align-items:center;justify-content:center}
+    .card{background:rgba(255,255,255,.05);border:1px solid rgba(37,211,102,.3);border-radius:24px;padding:40px 36px;text-align:center;max-width:420px;width:90%;backdrop-filter:blur(12px);box-shadow:0 20px 60px rgba(0,0,0,.4)}
+    h1{color:#fff;font-size:22px;font-weight:700;margin-bottom:6px}
+    .sub{color:#888;font-size:13px;margin-bottom:24px}
+    .qr-box{background:#fff;border-radius:16px;padding:16px;display:inline-block;margin-bottom:24px}
+    .steps{text-align:left;background:rgba(37,211,102,.08);border:1px solid rgba(37,211,102,.15);border-radius:12px;padding:16px 20px;margin-bottom:20px}
+    .steps h3{color:#25d366;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+    .step{display:flex;gap:10px;margin-bottom:8px;align-items:flex-start}
+    .num{background:#25d366;color:#000;border-radius:50%;width:20px;height:20px;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+    .txt{color:#ccc;font-size:13px;line-height:1.4}
+    .note{color:#555;font-size:11px}
+    .dot{display:inline-block;width:6px;height:6px;background:#25d366;border-radius:50%;margin-right:6px;animation:blink 1.5s ease-in-out infinite}
+    .spinner{width:48px;height:48px;border:4px solid rgba(37,211,102,.2);border-top-color:#25d366;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 20px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+    .green{color:#25d366;font-size:24px}
+    .icon{font-size:60px;margin-bottom:12px}
   </style>
 </head>
-<body>
-  <div class="card">
-    <div class="icon">✅</div>
-    <h1>WhatsApp Connected!</h1>
-    <p>Your Fusion College LMS is now linked and ready to send messages.</p>
-  </div>
-</body>
-</html>`);
+<body><div class="card">${body}</div></body>
+</html>`;
+
+    if (clientReady) {
+        return res.send(html(`
+            <div class="icon">✅</div>
+            <h1 class="green">WhatsApp Connected!</h1>
+            <p class="sub">Fusion College LMS is linked and ready to send messages.</p>
+        `));
     }
 
     if (!latestQR) {
-        return res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta http-equiv="refresh" content="5"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>WhatsApp Gateway — Loading</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      background: linear-gradient(135deg, #0f1923 0%, #1a2e1a 100%);
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-    }
-    .card {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(37,211,102,0.2);
-      border-radius: 20px;
-      padding: 48px 40px;
-      text-align: center;
-      max-width: 420px;
-      width: 90%;
-    }
-    .spinner {
-      width: 48px; height: 48px;
-      border: 4px solid rgba(37,211,102,0.2);
-      border-top-color: #25d366;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-      margin: 0 auto 20px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    h1 { color: #25d366; font-size: 20px; margin-bottom: 8px; }
-    p { color: #aaa; font-size: 13px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="spinner"></div>
-    <h1>Starting WhatsApp...</h1>
-    <p>Please wait. This page will refresh automatically when the QR code is ready.<br/><br/>This may take up to 2 minutes on first start.</p>
-  </div>
-</body>
-</html>`);
+        return res.send(html(`
+            <meta http-equiv="refresh" content="4"/>
+            <div class="spinner"></div>
+            <h1>Starting Gateway...</h1>
+            <p class="sub">Please wait, this takes a few seconds.<br/>Page auto-refreshes.</p>
+        `).replace('<meta charset="UTF-8"/>', '<meta charset="UTF-8"/>\n  <meta http-equiv="refresh" content="4"/>'));
     }
 
-    const qrImageDataUrl = await QRCode.toDataURL(latestQR, {
-        width: 280,
-        margin: 2,
-        color: { dark: '#000000', light: '#ffffff' }
-    });
+    const qrImageDataUrl = await QRCode.toDataURL(latestQR, { width: 280, margin: 2 });
 
-    res.send(`
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <meta http-equiv="refresh" content="30"/>
-  <title>WhatsApp Gateway — Scan QR</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      background: linear-gradient(135deg, #0f1923 0%, #1a2e1a 100%);
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-    }
-    .card {
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(37,211,102,0.3);
-      border-radius: 24px;
-      padding: 40px 36px;
-      text-align: center;
-      max-width: 420px;
-      width: 90%;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-    }
-    .logo { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 24px; }
-    .logo-icon { width: 40px; height: 40px; background: #25d366; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-    .logo-icon svg { width: 22px; height: 22px; fill: white; }
-    .logo-text { color: white; font-size: 18px; font-weight: 700; }
-    .logo-text span { color: #25d366; }
-    h1 { color: #ffffff; font-size: 22px; font-weight: 700; margin-bottom: 6px; }
-    .subtitle { color: #888; font-size: 13px; margin-bottom: 28px; }
-    .qr-wrapper { background: white; border-radius: 16px; padding: 16px; display: inline-block; margin-bottom: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
-    .qr-wrapper img { display: block; border-radius: 4px; }
-    .steps { text-align: left; background: rgba(37,211,102,0.08); border: 1px solid rgba(37,211,102,0.15); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; }
-    .steps h3 { color: #25d366; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
-    .step { display: flex; gap: 10px; margin-bottom: 8px; align-items: flex-start; }
-    .step-num { background: #25d366; color: #000; border-radius: 50%; width: 20px; height: 20px; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
-    .step-text { color: #ccc; font-size: 13px; line-height: 1.4; }
-    .refresh-note { color: #555; font-size: 11px; }
-    .dot { display: inline-block; width: 6px; height: 6px; background: #25d366; border-radius: 50%; margin-right: 6px; animation: blink 1.5s ease-in-out infinite; }
-    @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">
-      <div class="logo-icon">
-        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-          <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-        </svg>
-      </div>
-      <div class="logo-text">Fusion <span>Gateway</span></div>
-    </div>
-    <h1>Scan to Connect</h1>
-    <p class="subtitle">Link your WhatsApp to Fusion College LMS</p>
-    <div class="qr-wrapper">
-      <img src="${qrImageDataUrl}" width="280" height="280" alt="WhatsApp QR Code"/>
-    </div>
-    <div class="steps">
-      <h3>How to scan</h3>
-      <div class="step"><div class="step-num">1</div><div class="step-text">Open WhatsApp on your phone</div></div>
-      <div class="step"><div class="step-num">2</div><div class="step-text">Tap <strong style="color:#fff">Menu (⋮)</strong> → <strong style="color:#fff">Linked Devices</strong></div></div>
-      <div class="step"><div class="step-num">3</div><div class="step-text">Tap <strong style="color:#fff">Link a Device</strong> and scan this QR</div></div>
-    </div>
-    <p class="refresh-note"><span class="dot"></span>Page auto-refreshes every 30 seconds</p>
-  </div>
-</body>
-</html>`);
+    res.send(html(`
+        <h1>Scan to Connect</h1>
+        <p class="sub">Link WhatsApp to Fusion College LMS</p>
+        <div class="qr-box"><img src="${qrImageDataUrl}" width="280" height="280"/></div>
+        <div class="steps">
+            <h3>How to scan</h3>
+            <div class="step"><div class="num">1</div><div class="txt">Open WhatsApp on your phone</div></div>
+            <div class="step"><div class="num">2</div><div class="txt">Tap <strong style="color:#fff">Menu (⋮)</strong> → <strong style="color:#fff">Linked Devices</strong></div></div>
+            <div class="step"><div class="num">3</div><div class="txt">Tap <strong style="color:#fff">Link a Device</strong> and scan this QR</div></div>
+        </div>
+        <p class="note"><span class="dot"></span>Page auto-refreshes every 30 seconds</p>
+        <meta http-equiv="refresh" content="30"/>
+    `));
 });
 
-// ─── Status / Health Check ───────────────────────────────────────────────────
+// ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
     res.json({
         status: 'running',
-        whatsapp: clientReady ? 'connected' : 'waiting_for_qr_scan',
-        qr_page: '/qr',
-        message: clientReady
-            ? 'WhatsApp Gateway is online and ready.'
-            : 'Gateway started. Visit /qr to scan the QR code.'
+        engine: 'baileys',
+        whatsapp: clientReady ? 'connected' : 'waiting_for_qr',
+        qr_page: '/qr'
     });
 });
 
-// ─── Send Message API ────────────────────────────────────────────────────────
+// ─── Send Message API ─────────────────────────────────────────────────────────
 app.post('/send', async (req, res) => {
     const { to, message } = req.body;
 
@@ -214,8 +227,8 @@ app.post('/send', async (req, res) => {
         return res.status(400).json({ error: 'Missing "to" and "message" parameters.' });
     }
 
-    if (!clientReady) {
-        return res.status(503).json({ error: 'WhatsApp not connected yet. Visit /qr to scan the QR code.' });
+    if (!clientReady || !sock) {
+        return res.status(503).json({ error: 'WhatsApp not connected. Visit /qr to scan the QR code.' });
     }
 
     try {
@@ -223,85 +236,26 @@ app.post('/send', async (req, res) => {
         if (!cleanNumber.startsWith('92')) {
             cleanNumber = `92${cleanNumber.replace(/^0/, '')}`;
         }
-        const jid = `${cleanNumber}@c.us`;
-        const info = await client.sendMessage(jid, message);
-        res.json({ success: true, messageId: info.id.id });
+        const jid = `${cleanNumber}@s.whatsapp.net`;
+
+        await sock.sendMessage(jid, { text: message });
+        res.json({ success: true });
     } catch (err) {
         console.error('Failed to send message:', err);
-        res.status(500).json({ error: 'Failed to send message: ' + err.message });
+        res.status(500).json({ error: 'Failed to send: ' + err.message });
     }
 });
 
-// ─── Boot ────────────────────────────────────────────────────────────────────
-async function startClient() {
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+async function boot() {
     console.log('Connecting to MongoDB...');
     await mongoose.connect(MONGO_URI);
-    console.log('✅ MongoDB connected — session will persist across restarts.');
-
-    const store = new MongoStore({ mongoose });
-
-    console.log('Resolving Chromium executable path...');
-    const executablePath = await chromium.executablePath();
-    console.log(`Using Chromium at: ${executablePath}`);
-
-    client = new Client({
-        authStrategy: new RemoteAuth({
-            store,
-            backupSyncIntervalMs: 300000 // save session every 5 minutes
-        }),
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-        },
-        puppeteer: {
-            headless: chromium.headless,
-            executablePath,
-            args: [
-                ...chromium.args,
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--single-process'
-            ]
-        }
-    });
-
-    client.on('qr', (qr) => {
-        latestQR = qr;
-        clientReady = false;
-        console.log('New QR generated — visit /qr in your browser to scan it.');
-        qrcode.generate(qr, { small: true });
-    });
-
-    client.on('ready', () => {
-        clientReady = true;
-        latestQR = null;
-        console.log('✅ WhatsApp client connected and ready!');
-    });
-
-    client.on('remote_session_saved', () => {
-        console.log('✅ Session saved to MongoDB — will survive restarts.');
-    });
-
-    client.on('auth_failure', (msg) => {
-        clientReady = false;
-        console.error('Authentication failed:', msg);
-    });
-
-    client.on('disconnected', (reason) => {
-        clientReady = false;
-        console.log('WhatsApp disconnected:', reason);
-    });
-
-    await client.initialize();
+    console.log('✅ MongoDB connected.');
+    await connectToWhatsApp();
 }
 
 app.listen(PORT, () => {
-    console.log(`🚀 WhatsApp Gateway running on port ${PORT}`);
-    console.log(`👉 Visit /qr to scan the WhatsApp QR code`);
-    startClient().catch(err => console.error('Failed to start WhatsApp client:', err));
+    console.log(`🚀 WhatsApp Gateway (Baileys) running on port ${PORT}`);
+    console.log(`👉 Visit /qr to scan QR code`);
+    boot().catch(err => console.error('Boot error:', err));
 });
