@@ -10,6 +10,10 @@ app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3001;
 
+// Use /data on Render (persistent disk) or fall back to local folder
+const SESSION_PATH = process.env.SESSION_PATH || (require('fs').existsSync('/data') ? '/data/whatsapp_session' : './whatsapp_session');
+console.log(`Session will be stored at: ${SESSION_PATH}`);
+
 let clientReady = false;
 let latestQR = null; // stores raw QR string
 let client = null;
@@ -20,7 +24,7 @@ async function startClient() {
     console.log(`Using Chromium at: ${executablePath}`);
 
     client = new Client({
-        authStrategy: new LocalAuth({ dataPath: './whatsapp_session' }),
+        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
         puppeteer: {
             headless: chromium.headless,
             executablePath,
@@ -317,7 +321,7 @@ async function startClient() {
     console.log(`Using Chromium at: ${executablePath}`);
 
     client = new Client({
-        authStrategy: new LocalAuth({ dataPath: './whatsapp_session' }),
+        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
         puppeteer: {
             headless: chromium.headless,
             executablePath,
