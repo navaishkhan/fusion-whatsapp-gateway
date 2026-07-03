@@ -1,8 +1,7 @@
 const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const puppeteer = require('puppeteer');
-const path = require('path');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(express.json());
@@ -10,53 +9,67 @@ app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3001;
 
-// Get Puppeteer's auto-downloaded Chrome executable path
-const executablePath = puppeteer.executablePath();
-console.log(`Using Chrome at: ${executablePath}`);
+let clientReady = false;
+let client = null;
 
-// Initialize WhatsApp Client using the auto-downloaded Chrome
-const client = new Client({
-    authStrategy: new LocalAuth({
-        dataPath: './whatsapp_session'
-    }),
-    puppeteer: {
-        headless: true,
-        executablePath,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ]
-    }
-});
+async function startClient() {
+    console.log('Resolving Chromium executable path...');
+    const executablePath = await chromium.executablePath();
+    console.log(`Using Chromium at: ${executablePath}`);
 
-// Generate QR Code in terminal for scanning
-client.on('qr', (qr) => {
-    console.log('==================================================================');
-    console.log('SCAN THIS QR CODE WITH YOUR WHATSAPP APP (LINKED DEVICES):');
-    console.log('==================================================================');
-    qrcode.generate(qr, { small: true });
-});
+    client = new Client({
+        authStrategy: new LocalAuth({ dataPath: './whatsapp_session' }),
+        puppeteer: {
+            headless: chromium.headless,
+            executablePath,
+            args: [
+                ...chromium.args,
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--single-process'
+            ]
+        }
+    });
 
-client.on('ready', () => {
-    console.log('WhatsApp client connected and ready to send messages!');
-});
+    client.on('qr', (qr) => {
+        console.log('==================================================================');
+        console.log('SCAN THIS QR CODE WITH YOUR WHATSAPP APP (LINKED DEVICES):');
+        console.log('==================================================================');
+        qrcode.generate(qr, { small: true });
+    });
 
-client.on('auth_failure', (msg) => {
-    console.error('Authentication failed:', msg);
-});
+    client.on('ready', () => {
+        clientReady = true;
+        console.log('✅ WhatsApp client connected and ready!');
+    });
 
-client.on('disconnected', (reason) => {
-    console.log('WhatsApp disconnected:', reason);
-});
+    client.on('auth_failure', (msg) => {
+        clientReady = false;
+        console.error('Authentication failed:', msg);
+    });
+
+    client.on('disconnected', (reason) => {
+        clientReady = false;
+        console.log('WhatsApp disconnected:', reason);
+    });
+
+    await client.initialize();
+}
 
 // Health check route
 app.get('/', (req, res) => {
-    res.json({ status: 'running', message: 'WhatsApp Gateway is online.' });
+    res.json({
+        status: 'running',
+        whatsapp: clientReady ? 'connected' : 'waiting_for_qr_scan',
+        message: clientReady
+            ? 'WhatsApp Gateway is online and ready.'
+            : 'Gateway started. Scan QR code in the server logs.'
+    });
 });
 
 // API Route to send message
@@ -67,8 +80,11 @@ app.post('/send', async (req, res) => {
         return res.status(400).json({ error: 'Missing parameters: "to" and "message" are required.' });
     }
 
+    if (!clientReady) {
+        return res.status(503).json({ error: 'WhatsApp not connected yet. Please scan the QR code from server logs.' });
+    }
+
     try {
-        // Format phone number to WhatsApp JID format: e.g. "923001234567@c.us"
         let cleanNumber = to.replace(/[^0-9]/g, '');
         if (!cleanNumber.startsWith('92')) {
             cleanNumber = `92${cleanNumber.replace(/^0/, '')}`;
@@ -83,8 +99,10 @@ app.post('/send', async (req, res) => {
     }
 });
 
-client.initialize();
-
+// Start the Express server first, then initialize WhatsApp client
 app.listen(PORT, () => {
-    console.log(`WhatsApp API Gateway running on port ${PORT}`);
+    console.log(`🚀 WhatsApp Gateway running on port ${PORT}`);
+    startClient().catch(err => {
+        console.error('Failed to start WhatsApp client:', err);
+    });
 });
