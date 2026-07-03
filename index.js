@@ -1,72 +1,27 @@
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const chromium = require('@sparticuz/chromium');
+const mongoose = require('mongoose');
+const { MongoStore } = require('wwebjs-mongo');
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3001;
+const MONGO_URI = process.env.MONGO_URI;
 
-// Use /data on Render (persistent disk) or fall back to local folder
-const SESSION_PATH = process.env.SESSION_PATH || (require('fs').existsSync('/data') ? '/data/whatsapp_session' : './whatsapp_session');
-console.log(`Session will be stored at: ${SESSION_PATH}`);
+if (!MONGO_URI) {
+    console.error('❌ ERROR: MONGO_URI environment variable is not set!');
+    console.error('   Set it in Render → Environment → MONGO_URI');
+    process.exit(1);
+}
 
 let clientReady = false;
-let latestQR = null; // stores raw QR string
+let latestQR = null;
 let client = null;
-
-async function startClient() {
-    console.log('Resolving Chromium executable path...');
-    const executablePath = await chromium.executablePath();
-    console.log(`Using Chromium at: ${executablePath}`);
-
-    client = new Client({
-        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
-        puppeteer: {
-            headless: chromium.headless,
-            executablePath,
-            args: [
-                ...chromium.args,
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--single-process'
-            ]
-        }
-    });
-
-    client.on('qr', (qr) => {
-        latestQR = qr;
-        clientReady = false;
-        console.log('New QR code generated — visit /qr to scan it in your browser.');
-        qrcode.generate(qr, { small: true }); // also log to terminal as fallback
-    });
-
-    client.on('ready', () => {
-        clientReady = true;
-        latestQR = null;
-        console.log('✅ WhatsApp client connected and ready!');
-    });
-
-    client.on('auth_failure', (msg) => {
-        clientReady = false;
-        console.error('Authentication failed:', msg);
-    });
-
-    client.on('disconnected', (reason) => {
-        clientReady = false;
-        console.log('WhatsApp disconnected:', reason);
-    });
-
-    await client.initialize();
-}
 
 // ─── QR Code Web Page ───────────────────────────────────────────────────────
 app.get('/qr', async (req, res) => {
@@ -154,13 +109,12 @@ app.get('/qr', async (req, res) => {
   <div class="card">
     <div class="spinner"></div>
     <h1>Starting WhatsApp...</h1>
-    <p>Please wait. This page will refresh automatically when the QR code is ready.</p>
+    <p>Please wait. This page will refresh automatically when the QR code is ready.<br/><br/>This may take up to 2 minutes on first start.</p>
   </div>
 </body>
 </html>`);
     }
 
-    // Generate QR as base64 PNG image
     const qrImageDataUrl = await QRCode.toDataURL(latestQR, {
         width: 280,
         margin: 2,
@@ -194,52 +148,20 @@ app.get('/qr', async (req, res) => {
       backdrop-filter: blur(12px);
       box-shadow: 0 20px 60px rgba(0,0,0,0.4);
     }
-    .logo {
-      display: flex; align-items: center; justify-content: center;
-      gap: 10px; margin-bottom: 24px;
-    }
-    .logo-icon {
-      width: 40px; height: 40px;
-      background: #25d366;
-      border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-    }
+    .logo { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 24px; }
+    .logo-icon { width: 40px; height: 40px; background: #25d366; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
     .logo-icon svg { width: 22px; height: 22px; fill: white; }
     .logo-text { color: white; font-size: 18px; font-weight: 700; }
     .logo-text span { color: #25d366; }
-
     h1 { color: #ffffff; font-size: 22px; font-weight: 700; margin-bottom: 6px; }
     .subtitle { color: #888; font-size: 13px; margin-bottom: 28px; }
-
-    .qr-wrapper {
-      background: white;
-      border-radius: 16px;
-      padding: 16px;
-      display: inline-block;
-      margin-bottom: 24px;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-    }
+    .qr-wrapper { background: white; border-radius: 16px; padding: 16px; display: inline-block; margin-bottom: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
     .qr-wrapper img { display: block; border-radius: 4px; }
-
-    .steps {
-      text-align: left;
-      background: rgba(37,211,102,0.08);
-      border: 1px solid rgba(37,211,102,0.15);
-      border-radius: 12px;
-      padding: 16px 20px;
-      margin-bottom: 20px;
-    }
+    .steps { text-align: left; background: rgba(37,211,102,0.08); border: 1px solid rgba(37,211,102,0.15); border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; }
     .steps h3 { color: #25d366; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
     .step { display: flex; gap: 10px; margin-bottom: 8px; align-items: flex-start; }
-    .step-num {
-      background: #25d366; color: #000;
-      border-radius: 50%; width: 20px; height: 20px;
-      font-size: 11px; font-weight: 700;
-      display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0; margin-top: 1px;
-    }
+    .step-num { background: #25d366; color: #000; border-radius: 50%; width: 20px; height: 20px; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
     .step-text { color: #ccc; font-size: 13px; line-height: 1.4; }
-
     .refresh-note { color: #555; font-size: 11px; }
     .dot { display: inline-block; width: 6px; height: 6px; background: #25d366; border-radius: 50%; margin-right: 6px; animation: blink 1.5s ease-in-out infinite; }
     @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
@@ -255,21 +177,17 @@ app.get('/qr', async (req, res) => {
       </div>
       <div class="logo-text">Fusion <span>Gateway</span></div>
     </div>
-
     <h1>Scan to Connect</h1>
     <p class="subtitle">Link your WhatsApp to Fusion College LMS</p>
-
     <div class="qr-wrapper">
       <img src="${qrImageDataUrl}" width="280" height="280" alt="WhatsApp QR Code"/>
     </div>
-
     <div class="steps">
       <h3>How to scan</h3>
       <div class="step"><div class="step-num">1</div><div class="step-text">Open WhatsApp on your phone</div></div>
       <div class="step"><div class="step-num">2</div><div class="step-text">Tap <strong style="color:#fff">Menu (⋮)</strong> → <strong style="color:#fff">Linked Devices</strong></div></div>
       <div class="step"><div class="step-num">3</div><div class="step-text">Tap <strong style="color:#fff">Link a Device</strong> and scan this QR</div></div>
     </div>
-
     <p class="refresh-note"><span class="dot"></span>Page auto-refreshes every 30 seconds</p>
   </div>
 </body>
@@ -293,7 +211,7 @@ app.post('/send', async (req, res) => {
     const { to, message } = req.body;
 
     if (!to || !message) {
-        return res.status(400).json({ error: 'Missing parameters: "to" and "message" are required.' });
+        return res.status(400).json({ error: 'Missing "to" and "message" parameters.' });
     }
 
     if (!clientReady) {
@@ -316,12 +234,21 @@ app.post('/send', async (req, res) => {
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 async function startClient() {
+    console.log('Connecting to MongoDB...');
+    await mongoose.connect(MONGO_URI);
+    console.log('✅ MongoDB connected — session will persist across restarts.');
+
+    const store = new MongoStore({ mongoose });
+
     console.log('Resolving Chromium executable path...');
     const executablePath = await chromium.executablePath();
     console.log(`Using Chromium at: ${executablePath}`);
 
     client = new Client({
-        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
+        authStrategy: new RemoteAuth({
+            store,
+            backupSyncIntervalMs: 300000 // save session every 5 minutes
+        }),
         puppeteer: {
             headless: chromium.headless,
             executablePath,
@@ -352,6 +279,10 @@ async function startClient() {
         console.log('✅ WhatsApp client connected and ready!');
     });
 
+    client.on('remote_session_saved', () => {
+        console.log('✅ Session saved to MongoDB — will survive restarts.');
+    });
+
     client.on('auth_failure', (msg) => {
         clientReady = false;
         console.error('Authentication failed:', msg);
@@ -367,6 +298,6 @@ async function startClient() {
 
 app.listen(PORT, () => {
     console.log(`🚀 WhatsApp Gateway running on port ${PORT}`);
-    console.log(`👉 Visit /qr in your browser to scan the WhatsApp QR code`);
+    console.log(`👉 Visit /qr to scan the WhatsApp QR code`);
     startClient().catch(err => console.error('Failed to start WhatsApp client:', err));
 });
