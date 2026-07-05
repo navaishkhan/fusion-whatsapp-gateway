@@ -128,7 +128,6 @@ async function connectToWhatsApp() {
                 setTimeout(connectToWhatsApp, 3000);
             } else {
                 console.log('Logged out. Please restart the server and scan QR again.');
-                // Clear auth state so fresh QR is shown on next start
                 await AuthModel?.deleteMany({});
             }
         }
@@ -180,6 +179,11 @@ app.get('/qr', async (req, res) => {
             <div class="icon">✅</div>
             <h1 class="green">WhatsApp Connected!</h1>
             <p class="sub">Fusion College LMS is linked and ready to send messages.</p>
+            <form action="/logout" method="POST" style="margin-top: 24px;">
+                <button type="submit" style="background:#e11d48;color:white;border:none;border-radius:12px;padding:10px 20px;font-size:13px;font-weight:600;cursor:pointer;transition:background 0.2s;" onmouseover="this.style.background='#be123c'" onmouseout="this.style.background='#e11d48'">
+                    Disconnect Device (Sign Out)
+                </button>
+            </form>
         `));
     }
 
@@ -207,6 +211,52 @@ app.get('/qr', async (req, res) => {
         <p class="note"><span class="dot"></span>Page auto-refreshes every 30 seconds</p>
         <meta http-equiv="refresh" content="30"/>
     `));
+});
+
+// ==================== Logout / Reset Session Endpoint ====================
+app.post('/logout', async (req, res) => {
+    try {
+        console.log('Logout requested. Resetting session...');
+        
+        // 1. Try clean logout from Baileys
+        if (sock) {
+            try {
+                await sock.logout();
+            } catch (err) {
+                console.log('Baileys logout failed or socket already closed:', err.message);
+                try {
+                    sock.end();
+                } catch (e) {}
+            }
+        }
+
+        // 2. Clear credentials from MongoDB
+        if (AuthModel) {
+            await AuthModel.deleteMany({});
+            console.log('Auth records purged from MongoDB.');
+        }
+
+        // 3. Reset state
+        sock = null;
+        clientReady = false;
+        latestQR = null;
+        isConnecting = false;
+
+        // 4. Reconnect to generate a fresh QR code
+        connectToWhatsApp().catch(err => {
+            console.error('Reconnect failed:', err);
+        });
+
+        // If called from the /qr web page button, redirect back to /qr page
+        if (req.headers.referer && req.headers.referer.includes('/qr')) {
+            return res.redirect('/qr');
+        }
+
+        res.json({ success: true, message: 'Successfully logged out and session reset.' });
+    } catch (e) {
+        console.error('Logout error:', e);
+        res.status(500).json({ error: 'Failed to logout: ' + e.message });
+    }
 });
 
 // ==================== Health Check ====================
