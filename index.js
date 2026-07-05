@@ -269,7 +269,23 @@ app.get('/', (req, res) => {
     });
 });
 
-// ==================== Send Message API ====================
+// /status — explicit connection status (used by LMS admin dashboard)
+app.get('/status', (req, res) => {
+    res.json({
+        connected: clientReady,
+        status: clientReady ? 'connected' : 'disconnected',
+        message: clientReady
+            ? 'WhatsApp is connected and ready to send messages.'
+            : 'WhatsApp is not connected. Visit /qr to scan the QR code.',
+    });
+});
+
+// /ping — lightweight keepalive (call every 10 min to prevent Render sleep)
+app.get('/ping', (req, res) => {
+    res.json({ ok: true, ts: Date.now() });
+});
+
+
 app.post('/send', async (req, res) => {
     const { to, message } = req.body;
 
