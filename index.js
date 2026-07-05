@@ -14,11 +14,11 @@ const PORT = process.env.PORT || 3001;
 const MONGO_URI = process.env.MONGO_URI;
 
 if (!MONGO_URI) {
-    console.error('âŒ MONGO_URI environment variable is not set!');
+    console.error('❌ MONGO_URI environment variable is not set!');
     process.exit(1);
 }
 
-// â”€â”€â”€ MongoDB Auth State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== MongoDB Auth State ====================
 const AuthSchema = new mongoose.Schema({ _id: String, value: mongoose.Schema.Types.Mixed });
 let AuthModel;
 
@@ -75,13 +75,13 @@ async function useMongoAuthState() {
     };
 }
 
-// â”€â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== State ====================
 let sock = null;
 let clientReady = false;
 let latestQR = null;
 let isConnecting = false;
 
-// â”€â”€â”€ Connect WhatsApp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== Connect WhatsApp ====================
 async function connectToWhatsApp() {
     if (isConnecting) return;
     isConnecting = true;
@@ -112,7 +112,7 @@ async function connectToWhatsApp() {
         if (qr) {
             latestQR = qr;
             clientReady = false;
-            console.log('QR code generated â€” visit /qr in your browser to scan it.');
+            console.log('QR code generated — visit /qr in your browser to scan it.');
         }
 
         if (connection === 'close') {
@@ -137,12 +137,12 @@ async function connectToWhatsApp() {
             clientReady = true;
             latestQR = null;
             isConnecting = false;
-            console.log('âœ… WhatsApp connected and ready!');
+            console.log('✅ WhatsApp connected and ready!');
         }
     });
 }
 
-// â”€â”€â”€ QR Page â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== QR Page ====================
 app.get('/qr', async (req, res) => {
     const html = (body) => `
 <!DOCTYPE html>
@@ -150,7 +150,7 @@ app.get('/qr', async (req, res) => {
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>WhatsApp Gateway â€” Fusion College</title>
+  <title>WhatsApp Gateway — Fusion College</title>
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#0f1923,#1a2e1a);min-height:100vh;display:flex;align-items:center;justify-content:center}
@@ -177,7 +177,7 @@ app.get('/qr', async (req, res) => {
 
     if (clientReady) {
         return res.send(html(`
-            <div class="icon">âœ…</div>
+            <div class="icon">✅</div>
             <h1 class="green">WhatsApp Connected!</h1>
             <p class="sub">Fusion College LMS is linked and ready to send messages.</p>
         `));
@@ -201,7 +201,7 @@ app.get('/qr', async (req, res) => {
         <div class="steps">
             <h3>How to scan</h3>
             <div class="step"><div class="num">1</div><div class="txt">Open WhatsApp on your phone</div></div>
-            <div class="step"><div class="num">2</div><div class="txt">Tap <strong style="color:#fff">Menu (â‹®)</strong> â†’ <strong style="color:#fff">Linked Devices</strong></div></div>
+            <div class="step"><div class="num">2</div><div class="txt">Tap <strong style="color:#fff">Menu (⋮)</strong> &rarr; <strong style="color:#fff">Linked Devices</strong></div></div>
             <div class="step"><div class="num">3</div><div class="txt">Tap <strong style="color:#fff">Link a Device</strong> and scan this QR</div></div>
         </div>
         <p class="note"><span class="dot"></span>Page auto-refreshes every 30 seconds</p>
@@ -209,7 +209,7 @@ app.get('/qr', async (req, res) => {
     `));
 });
 
-// â”€â”€â”€ Health Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== Health Check ====================
 app.get('/', (req, res) => {
     res.json({
         status: 'running',
@@ -219,7 +219,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// â”€â”€â”€ Send Message API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== Send Message API ====================
 app.post('/send', async (req, res) => {
     const { to, message } = req.body;
 
@@ -252,17 +252,16 @@ app.post('/send', async (req, res) => {
     }
 });
 
-// â”€â”€â”€ Boot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ==================== Boot ====================
 async function boot() {
     console.log('Connecting to MongoDB...');
     await mongoose.connect(MONGO_URI);
-    console.log('âœ… MongoDB connected.');
+    console.log('✅ MongoDB connected.');
     await connectToWhatsApp();
 }
 
 app.listen(PORT, () => {
-    console.log(`ðŸš€ WhatsApp Gateway (Baileys) running on port ${PORT}`);
-    console.log(`ðŸ‘‰ Visit /qr to scan QR code`);
+    console.log(`🚀 WhatsApp Gateway (Baileys) running on port ${PORT}`);
+    console.log(`👉 Visit /qr to scan QR code`);
     boot().catch(err => console.error('Boot error:', err));
 });
-
